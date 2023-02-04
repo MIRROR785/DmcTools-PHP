@@ -182,7 +182,9 @@ class Note {
         if ($this->noteNo !== null) {
             $noteNo = ($this->octave - 1) * 12 + $this->noteNo;
             $freq = $periods[$noteNo];
-            $result += round($base_sample / $freq, 0);
+            $v = round($base_sample / $freq, 0);
+            $v -= $v % 2;
+            $result += $v;
         }
 
         return $result;
@@ -247,7 +249,7 @@ class Envelope {
     }
 }
 
-$options = getopt('vsprla:b:u:f:o::');
+$options = getopt('vsprla:b:d:u:f:o::');
 //var_dump($options);
 
 $verbose = isset($options['v']);
@@ -256,6 +258,8 @@ $srcfile = isset($options['f']) ? $options['f']: 'php://stdin';
 $default_base_sample = $samples[isset($options['b']) ? (int)$options['b']: 0x0f];
 $default_unit = isset($options['u']) ? (int)$options['u']: 60;
 $default_phase = isset($options['p']) ? true : false;
+$default_duty = (isset($options['d']) || !$default_phase) ? true: false;
+$default_duty_rate = isset($options['d']) ? (double)$options['d'] : 50;
 $default_rate_params = isset($options['r']) ? true : false;
 $default_lost_end = isset($options['l']) ? true : false;
 $default_freq_add = isset($options['a']) ? (double)$options['a']: 0;
@@ -264,6 +268,8 @@ $default_freq_add = isset($options['a']) ? (double)$options['a']: 0;
 $base_sample = $default_base_sample;
 $unit = $default_unit;
 $phase = $default_phase;
+$duty = $default_duty;
+$duty_rate = $default_duty_rate;
 $rate_params = $default_rate_params;
 $lost_end = $default_lost_end;
 $freq_add = $default_freq_add;
@@ -285,6 +291,8 @@ foreach ($lines as $args) {
         $base_sample = $default_base_sample;
         $unit = $default_unit;
         $phase = $default_phase;
+        $duty = $default_duty;
+        $duty_rate = $default_duty_rate;
         $rate_params = $default_rate_params;
         $lost_end = $default_lost_end;
         $freq_add = $default_freq_add;
@@ -305,6 +313,7 @@ foreach ($lines as $args) {
 
             case '-p':
                 $phase = true;
+                $duty = false;
                 break;
             case '-p-':
                 $phase = false;
@@ -324,6 +333,15 @@ foreach ($lines as $args) {
                 $lost_end = false;
                 break;
 
+            case '-d':
+                $duty = true;
+                $duty_rate = (double)$prms[++$index];
+                $phase = false;
+                break;
+            case '-d-':
+                $duty = false;
+                break;
+
             case '-v':
                 $verbose = true;
                 break;
@@ -332,7 +350,7 @@ foreach ($lines as $args) {
                 break;
             }
         }
-        echo 'base sample='.$base_sample.', unit='.$unit.', phase='.$phase.', rate params='.$rate_params.', lost end='.$lost_end."\n";
+        echo 'base sample='.$base_sample.', unit='.$unit.($duty ? ', duty='.$duty_rate: ', phase='.$phase).', rate params='.$rate_params.', lost end='.$lost_end."\n";
         continue;
     }
 
@@ -367,7 +385,6 @@ foreach ($lines as $args) {
     echo 'base sample='.$base_sample.', octave='.$baseNote->octave.', note='.$baseNote->note.', size='.$count."\n";
     $freq = $baseNote->getFreq($base_sample);
 
-    $freq -= $freq % 2;
     $range = (int)($freq / 2);
     $steps = (int)($length / $freq);
 
@@ -412,7 +429,6 @@ foreach ($lines as $args) {
                 } else {
                     $env->freq = $baseNote->getFreq($base_sample) + $nextNote->offset;
                 }
-                $env->freq -= $env->freq % 2;
                 $env->range = (int)($env->freq / 2);
 
                 if ($phase) {
@@ -541,7 +557,11 @@ foreach ($lines as $args) {
                 $pre = $volume;
 
                 $level  += ($b << 2) - 2;
-                $volume += ($v << 2) - 2;
+
+                $nv = $volume + ($v << 2) - 2;
+                if (0 <= $nv && $nv < 128) {
+                    $volume = $nv;
+                }
                 //echo $level."\n";
 
                 $bts .= $v;
@@ -559,6 +579,97 @@ foreach ($lines as $args) {
                     $mod_count = 0;
                     ++$step;
                     $env->freq += $freq_add;
+                }
+            }
+
+        } else if ($duty) {
+
+            for ($index = 0; $index < $length; ++$index) {
+                $v = $b;
+                //$n = $level;
+                $n = $volume;
+
+                do {
+                    $loop = false;
+
+                    switch ($action) {
+                    case 0: // attack
+                        if ($step < $env->attack) {
+                            if ($verbose) echo 'attack: '.$step.':'.'n='.$n.', limit='.(($env->range * 2 * ($step + 1) / ($env->attack + 1) + $env->min) * $duty_rate * $env->volume / 10000)."\n";
+                            if ($n > ($env->range * 2 * ($step + 1) / ($env->attack + 1) + $env->min) * $duty_rate * $env->volume / 10000) $v = $p ^ 1;
+                            break;
+                        } else {
+                            $step = 0;
+                            ++$action;
+                        }
+                    case 1: // decay
+                        if ($step < $env->decay) {
+                            if ($verbose) echo 'decay: '.$step.':'.'n='.$n.', limit='.(($env->sustain + ($env->max - $env->sustain) * ($env->decay - $step) / $env->decay) * $duty_rate * $env->volume / 10000)."\n";
+                            if ($n > ($env->sustain + ($env->max - $env->sustain) * ($env->decay - $step) / $env->decay) * $duty_rate * $env->volume / 10000) $v = $p ^ 1;
+                            break;
+                        } else {
+                            $step = 0;
+                            ++$action;
+                        }
+                    case 2: // sustain
+                        if ($step < $env->scount) {
+                            if ($verbose) echo 'sustain: '.$step.':'.'n='.$n.', limit='.($env->sustain * $duty_rate * $env->volume / 10000)."\n";
+                            if ($n > $env->sustain * $duty_rate * $env->volume / 10000) $v = $p ^ 1;
+                            break;
+                        } else {
+                            $step = 0;
+                            ++$action;
+                        }
+                    case 3: // release
+                        if ($step < $env->release) {
+                            if ($verbose) echo 'release: '.$step.':'.'n='.$n.', limit='.(($env->sustain * ($env->release - $step) / $env->release) * $duty_rate * $env->volume / 10000)."\n";
+                            if ($n > ($env->sustain * ($env->release - $step) / $env->release) * $duty_rate * $env->volume / 10000) $v = $p ^ 1;
+                            break;
+                        } else if (++$env_index < $env_count) {
+                            if ($verbose) echo 'loop:'.$env_index.'/'.$env_count."\n";
+                            $action = 0;
+                            $loop = true;
+                            $env = $list[$env_index];
+                            break;
+                        } else {
+                            ++$action;
+                        }
+                    default:
+                        $v = ($lost_end) ? 0 : (($volume < $end_level + 2) ? 1: 0);
+                        break;
+                    }
+                } while($loop);
+
+                //echo "action=".$action.", step=".$step.", n=".$n.", b=".$b.", v=".$v."\n";
+
+                $pre = $volume;
+
+                $level  += ($b << 2) - 2;
+
+                $nv = $volume + ($v << 2) - 2;
+                if (0 <= $nv && $nv < 128) {
+                    $volume = $nv;
+                }
+
+                $bts .= $v;
+                $p    = $v;
+
+                if (++$mod_count >= $env->freq) {
+                    $mod_count = 0;
+                    $d = 0;
+                    $b = $c;
+                    $c ^= 1;
+                    ++$step;
+                    $env->freq += $freq_add;
+
+                } else if ($d == 0) {
+                    $duty_edge = round($env->freq * $duty_rate / 200, 0);
+
+                    if ($mod_count >= $duty_edge) {
+                        ++$d;
+                        $b = $c;
+                        $c ^= 1;
+                    }
                 }
             }
 
@@ -624,7 +735,11 @@ foreach ($lines as $args) {
                 $pre = $volume;
 
                 $level  += ($b << 2) - 2;
-                $volume += ($v << 2) - 2;
+
+                $nv = $volume + ($v << 2) - 2;
+                if (0 <= $nv && $nv < 128) {
+                    $volume = $nv;
+                }
 
                 $bts .= $v;
                 $p    = $v;
