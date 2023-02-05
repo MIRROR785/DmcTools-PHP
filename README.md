@@ -19,6 +19,9 @@ php dmc.php [-f config file] [-o]
 
 See dmc.conf.sample for details on specifying parameters.
 
+dmc.samples.zip は、実際に dmc.conf.sample の定義で出力した DMC ファイルと、その WAV ファイルです。
+
+dmc.samples.zip is the actual DMC file output by the definition of dmc.conf.sample and its WAV file.
 
 ## dmc2bts.php
 
